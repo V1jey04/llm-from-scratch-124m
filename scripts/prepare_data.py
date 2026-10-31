@@ -1,8 +1,8 @@
 """Tokenize documents into uint16 shards for training.
 
 From FineWeb-Edu on Hugging Face (what the Kaggle CPU notebook runs):
-    python scripts/prepare_data.py --tokenizer models/fineweb_edu_32k.json --out data/tokens \\
-        --hf-train-files 000_00000 001_00000 002_00000 --hf-val-file 013_00000 \\
+    python scripts/prepare_data.py --tokenizer tokenizers/fineweb_edu_32k.json --out data/tokens \\
+        --hf-train-files 000_00000 001_00000 002_00000 003_00000 --hf-val-file 013_00000 \\
         --train-tokens 2_100_000_000 --val-tokens 10_000_000
 
 From local JSONL files (for testing the pipeline on a Mac):
@@ -121,6 +121,9 @@ def main():
         info = splits[split]
         print(f"{split}: {info['documents']:,} documents, {info['tokens']:,} tokens, "
               f"{info['text_bytes'] / info['tokens']:.2f} bytes/token, {len(info['shards'])} shards")
+        if info["tokens"] < max_tokens and max_tokens < 10**12:
+            print(f"WARNING: {split} ran out of documents at {info['tokens']:,} of the "
+                  f"{max_tokens:,} tokens asked for; add more source files.")
     write_manifest(out, {"file": "tokenizer.json", "sha256": tokenizer_sha, "vocab_size": tokenizer.vocab_size,
                          "eos_id": tokenizer.EOS_ID}, splits, source)
 

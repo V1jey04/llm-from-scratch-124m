@@ -126,3 +126,17 @@ single big batch, and that fp16/bf16 training works.
 Smoke run on the Mac (11.6M parameters, 4M tokens, M4 GPU, about 6 minutes
 including a stop and resume at step 150): validation loss 5.82, 1.82 bits per
 byte.
+
+## Running on Kaggle (free 2×T4)
+
+The trained 32k tokenizer is committed as `tokenizers/fineweb_edu_32k.json`
+(SHA-256 starts `af1bf016d3825e14`), so Kaggle uses exactly the same one.
+
+1. **`kaggle/01_prepare_data.ipynb`**, a CPU notebook with internet on:
+   downloads FineWeb-Edu files 000–003 (training) and 013 (validation) and
+   writes about 2.1B training tokens to `/kaggle/working/tokens`. Save its
+   output as a private dataset named `fineweb-edu-tokens-32k`.
+2. **`kaggle/02_train.ipynb`**, a GPU T4 ×2 notebook with that dataset
+   attached: set `CONFIG`, `RUN` and `EXTRA` in the first cell. To resume,
+   attach the previous version's output too; the newest checkpoint for `RUN`
+   is copied in automatically.

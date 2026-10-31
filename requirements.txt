@@ -1,0 +1,5 @@
+# Only for data download and benchmarks; the tokenizer itself needs no packages.
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+huggingface_hub==2.4.0
+pyarrow==26.0.0
+tiktoken==0.14.0

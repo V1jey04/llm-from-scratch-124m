@@ -11,5 +11,6 @@
   "eval_batches": 20,
   "log_every": 10,
   "checkpoint_minutes": 30,
-  "time_limit_hours": 11.25
+  "time_limit_hours": 11.25,
+  "compile": true
 }

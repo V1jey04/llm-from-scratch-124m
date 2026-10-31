@@ -134,9 +134,22 @@ The trained 32k tokenizer is committed as `tokenizers/fineweb_edu_32k.json`
 
 1. **`kaggle/01_prepare_data.ipynb`**, a CPU notebook with internet on:
    downloads FineWeb-Edu files 000–003 (training) and 013 (validation) and
-   writes about 2.1B training tokens to `/kaggle/working/tokens`. Save its
-   output as a private dataset named `fineweb-edu-tokens-32k`.
-2. **`kaggle/02_train.ipynb`**, a GPU T4 ×2 notebook with that dataset
-   attached: set `CONFIG`, `RUN` and `EXTRA` in the first cell. To resume,
+   writes about 2.1B training tokens to `/kaggle/working/tokens`. It took 24
+   minutes and wrote 2,100,005,190 training and 10,001,088 validation tokens
+   (4.0 GB).
+2. **`kaggle/02_train.ipynb`**, a GPU T4 ×2 notebook with the data notebook's
+   output attached as an input (**Add Input → Notebook**; no separate dataset
+   is needed): set `CONFIG`, `RUN` and `EXTRA` in the first cell. To resume,
    attach the previous version's output too; the newest checkpoint for `RUN`
    is copied in automatically.
+
+Smoke tests of the 124M model on 2×T4 (20 steps, 262,144 tokens per step,
+fp16). Losses were identical to three decimals in both runs:
+
+| Setting | Tokens/s at steps 15–20 | Peak memory per GPU |
+|---|---:|---:|
+| Eager PyTorch | 15,096 | 11.2 GB |
+| `compile: true` (now the default in the Kaggle configs) | 24,444 | 7.7 GB |
+
+At about 24k tokens/s, 2B tokens take roughly 23 GPU-hours, within one week's
+30-hour Kaggle quota.

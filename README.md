@@ -153,3 +153,18 @@ fp16). Losses were identical to three decimals in both runs:
 
 At about 24k tokens/s, 2B tokens take roughly 23 GPU-hours, within one week's
 30-hour Kaggle quota.
+
+## Talk to a trained model
+
+Download `final_model.pt` from the training notebook's output (Kaggle may
+save it as `final_model.zip`; it is the same file), put it in `models/`, then:
+
+```sh
+.venv/bin/python -m lm.chat --model models/pilot_final_model.pt
+```
+
+This is a base model: it continues text and was never taught to answer
+questions. Chat mode wraps each message as `Question: … / Answer:` and stops
+at the next blank line or question; `/text` switches to plain continuation.
+The 300M-token pilot writes fluent English that soon drifts off topic and
+invents facts.

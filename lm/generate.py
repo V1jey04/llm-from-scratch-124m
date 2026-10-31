@@ -1,5 +1,7 @@
 """Turn next-token logits into text, one token at a time."""
 
+from typing import Callable
+
 import torch
 
 
@@ -38,8 +40,12 @@ def next_token_distribution(logits: torch.Tensor, previous: torch.Tensor, temper
 @torch.no_grad()
 def generate(model, prompt_ids: list[int], max_new_tokens: int, temperature: float = 1.0,
              top_k: int | None = None, top_p: float | None = None, repetition_penalty: float = 1.0,
-             eos_id: int | None = None, generator: torch.Generator | None = None) -> list[int]:
+             eos_id: int | None = None, generator: torch.Generator | None = None,
+             on_token: Callable[[list[int]], bool] | None = None) -> list[int]:
     """Return only the new token IDs. temperature=0 means greedy (always the top token).
+
+    on_token, if given, is called with the new IDs so far after each token, so
+    a caller can print text as it appears; returning True stops generation.
 
     This recomputes the whole sequence for every new token. That is simple and
     fine for short samples; a key/value cache would avoid the repeated work.
@@ -61,4 +67,6 @@ def generate(model, prompt_ids: list[int], max_new_tokens: int, temperature: flo
             break
         new_ids.append(token)
         ids = torch.cat((ids, torch.tensor([token], device=device)))
+        if on_token is not None and on_token(new_ids):
+            break
     return new_ids

@@ -164,6 +164,16 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(generate(FavoriteTokenModel(3), [1, 2], 5, temperature=0), [3] * 5)
         self.assertEqual(generate(FavoriteTokenModel(3), [1, 2], 5, temperature=0, eos_id=3), [])
 
+    def test_on_token_sees_each_token_and_can_stop(self):
+        seen = []
+
+        def on_token(new_ids):
+            seen.append(list(new_ids))
+            return len(new_ids) == 3
+
+        self.assertEqual(generate(FavoriteTokenModel(3), [1], 10, temperature=0, on_token=on_token), [3, 3, 3])
+        self.assertEqual(seen, [[3], [3, 3], [3, 3, 3]])
+
     def test_top_k_and_top_p_keep_only_the_top_token(self):
         logits = torch.tensor([1.0, 3.0, 2.0, 0.0])
         for probabilities in (next_token_distribution(logits, torch.tensor([]), top_k=1),

@@ -1,3 +1,4 @@
+import json
 import os
 import socket
 import tempfile
@@ -159,6 +160,20 @@ class TrainingTests(unittest.TestCase):
         resumed = final_weights(Path(self.directory.name) / "interrupted")
         for name in expected:
             torch.testing.assert_close(resumed[name], expected[name], atol=0, rtol=0, msg=name)
+
+    def test_first_log_after_resume_averages_only_the_steps_it_ran(self):
+        # Every step logged separately, as the reference.
+        self.run_in("every_step", log_every=1)
+        # Stop at step 3 with log_every=4: after resuming, step 4 is the only step
+        # in its logging window, so its logged loss is that one step's loss.
+        self.run_in("resumed", log_every=4, stop_after_steps=3)
+        self.run_in("resumed", log_every=4)
+
+        def train_losses(name):
+            lines = (Path(self.directory.name) / name / "log.jsonl").read_text().splitlines()
+            return {r["step"]: r["loss"] for r in map(json.loads, lines) if "loss" in r}
+
+        self.assertAlmostEqual(train_losses("resumed")[4], train_losses("every_step")[4], places=5)
 
     def test_resume_refuses_a_different_model(self):
         self.run_in("run", stop_after_steps=2)

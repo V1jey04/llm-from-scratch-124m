@@ -2,7 +2,7 @@
 
 Project: Write a tokenizer and Transformer from scratch, then train a roughly 0.1B parameter language model.
 
-Implementation snapshot: September 30, 2026.
+Implementation snapshot: October 31, 2026 (first written September 30, 2026; updated after GPT-2-style pre-splitting, the fast trainer and encoder, and the FineWeb-Edu tokenizer).
 
 Audience: a learner who knows basic Python and is beginning machine learning.
 
@@ -14,23 +14,24 @@ We have built a small, functioning **byte-level byte pair encoding tokenizer**, 
 
 It can:
 
-- Learn repeated byte sequences from training documents.
-- Encode text into integer token IDs.
+- Split text into GPT-2-style chunks (words, numbers, symbols, whitespace) before learning merges.
+- Learn repeated byte sequences from training documents, quickly enough for hundreds of megabytes.
+- Encode text into integer token IDs, on one CPU core or across all of them.
 - Decode those IDs back into the original text.
 - Handle unfamiliar words, emoji, and valid UTF-8 text from different languages.
 - Preserve case, punctuation, spaces, tabs, and newlines in strings passed to its API.
-- Save its learned rules as JSON and reload them.
-- Display the byte sequence represented by each token.
+- Save its learned rules and split pattern as JSON and reload them.
+- Display the chunks and the byte sequence represented by each token.
 
-The project currently contains two small saved tokenizers: a demonstration tokenizer and a tokenizer trained on a short robot-and-cat text file. Ten correctness tests have passed. This is an educational reference implementation. We have not yet built the Transformer, embeddings, next-token predictor, or full language-model training pipeline.
+The small examples in this lesson use a demonstration tokenizer and a tokenizer trained on a short robot-and-cat text file, so every step can be followed by hand. The project also has a full-size tokenizer: 32,768 IDs trained on 304 MB of FineWeb-Edu, which matches GPT-2's compression on held-out text (4.63 vs 4.64 bytes per token) with a smaller vocabulary. 23 tokenizer tests pass.
 
-Our long-term plan proposes a vocabulary of 16,384 total IDs for a roughly 98-million-parameter model. The current examples use only 269 or 280 total IDs. The small vocabulary helps us see exactly what the algorithm does before optimizing it for larger data.
+The tokenizer is one part of a larger project. The Transformer (about 124 million parameters, `MODEL_LESSON.md`) and the training pipeline (`TRAINING_LESSON.md`) now exist too; this lesson covers only the tokenizer.
 
 ## 2. Why a language model needs tokenization
 
 Neural networks calculate with numbers. Tokenization provides a consistent way to represent text as a sequence of numbers.
 
-The eventual pipeline will be:
+The full pipeline is:
 
 ```text
 Text
@@ -44,7 +45,7 @@ Text
   → tokenizer decodes the output IDs into text
 ```
 
-The tokenizer is responsible for mapping between text and IDs. The future language model will learn which IDs are likely to follow which other IDs.
+The tokenizer is responsible for mapping between text and IDs. The language model learns which IDs are likely to follow which other IDs.
 
 For example, our tiny tokenizer maps:
 
@@ -55,7 +56,7 @@ Hello, little robot!
 to:
 
 ```text
-[72, 278, 44, 279, 270, 116, 33]
+[72, 101, 278, 44, 271, 272, 33]
 ```
 
 The tokenizer has not understood the sentence. It has represented the sentence using reusable pieces of bytes.
@@ -68,7 +69,7 @@ The tokenizer has not understood the sentence. It has represented the sentence u
 | Token ID | An integer identifying a token. |
 | Vocabulary | The complete set of IDs and their meanings, including special IDs. |
 | Vocabulary size | The number of distinct IDs available. |
-| Corpus | The text collection used to train the tokenizer or a future language model. |
+| Corpus | The text collection used to train the tokenizer or the language model. |
 | Document | One separate text item supplied to tokenizer training. |
 | Byte | An 8-bit value, represented by an integer from 0 to 255. |
 | UTF-8 | The encoding used to convert our text strings into bytes. |
@@ -186,20 +187,23 @@ The sizes and IDs in this layout are our project's design choices. Other tokeniz
 
 Tokenizer training learns a sequence of merge rules from text frequency. It does not use gradients, a neural network, or an optimizer.
 
-The current procedure is:
+The procedure is:
 
 1. Receive a collection of separate text documents.
-2. Encode each document as UTF-8 bytes.
-3. Treat each byte as an initial token ID.
-4. Count all adjacent ID pairs within each document.
-5. Choose the pair with the highest count.
-6. If several pairs have the same highest count, choose the smallest pair of IDs in lexicographic order.
-7. Create a new ID representing the concatenated bytes of that pair.
-8. Replace its occurrences from left to right, without overlapping replacements.
-9. Count pairs again in the updated sequences.
-10. Repeat until the requested vocabulary size is reached or no eligible pair remains.
+2. Split each document into chunks with the GPT-2-style pattern (section 7.5).
+3. Encode each chunk as UTF-8 bytes.
+4. Treat each byte as an initial token ID.
+5. Count all adjacent ID pairs within each chunk.
+6. Choose the pair with the highest count.
+7. If several pairs have the same highest count, choose the smallest pair of IDs in lexicographic order.
+8. Create a new ID representing the concatenated bytes of that pair.
+9. Replace its occurrences from left to right, without overlapping replacements.
+10. Update the pair counts for the changed chunks.
+11. Repeat until the requested vocabulary size is reached or no eligible pair remains.
 
 The default minimum pair frequency is 2. A pair seen only once is therefore not merged under the default setting.
+
+Two implementations follow this procedure. `train_reference` recounts every pair after every merge: slow, but easy to check. `train` gives exactly the same merges much faster (section 7.6). The tests require the two to agree.
 
 ### 7.1 Counting pairs in `banana`
 
@@ -296,21 +300,58 @@ There are two replacements because replacements cannot reuse a byte already cons
 
 Training on `["a", "b"]` provides two one-byte documents. There is no adjacent pair to merge. Training on `["ab"]` provides one two-byte document containing the pair `(97, 98)`.
 
-The command-line trainer treats each input file as one document. Lines inside a file are not automatically treated as separate documents. A newline is an ordinary byte, and learned tokens can include it. Merges do not cross the boundary between input files.
+The command-line trainer treats each plain input file as one document, and each line of a `.jsonl` file (its `"text"` field) as one document. Lines inside a plain file are not automatically separate documents. Merges never cross a document boundary, and with pre-splitting they also never cross a chunk boundary.
 
 The file reader uses Python text mode, which can normalize platform line endings when loading files. Exact round-trip guarantees refer to the string supplied to `encode`, or the bytes supplied to `encode_bytes`, rather than every possible original file representation.
+
+### 7.5 Pre-splitting into chunks
+
+Without splitting, BPE learns whatever byte runs are frequent, including ones that join a word to its neighbor. On the robot-and-cat corpus, a tokenizer trained with pre-splitting turned off learns pieces such as `t sa`, `.\n` and `e `.
+
+GPT-2 avoided this by cutting text into chunks first and merging only inside a chunk. Our `GPT2_SPLIT_PATTERN` tries these branches in order:
+
+| Branch | Matches | Example |
+|---|---|---|
+| Contraction | `'s`, `'t`, `'re`, `'ve`, `'m`, `'ll`, `'d` (any case) | `it's` → `it` + `'s` |
+| Letters | an optional space, then letters | ` world` |
+| Digits | an optional space, then digits | ` 2026` |
+| Other | an optional space, then symbols, including `_` | `,` or ` !?` |
+| Whitespace | spaces, leaving one for the next word | `a   b` → `a`, `  `, ` b` |
+
+```python
+from tokenizer.bpe import GPT2_SPLIT_PATTERN, pre_split
+print(pre_split("Hello world, it's 2026!", GPT2_SPLIT_PATTERN))
+# ['Hello', ' world', ',', ' it', "'s", ' 2026', '!']
+```
+
+Every character matches some branch, so the chunks always join back into the original text. One known limitation, shared with GPT-2: combining marks, such as Devanagari vowel signs, count as symbols rather than letters, so those words split into more chunks.
+
+### 7.6 Making training fast without changing the answer
+
+Recounting every pair before each merge takes about 60 seconds for 1,000 merges on 0.5 MB. The fast trainer uses three ideas:
+
+1. **Count each distinct chunk once**, with a weight for how often it occurs. 36 MB of Python source has only about 100,000 distinct chunks.
+2. **Update counts instead of recounting.** A merge changes only the chunks containing that pair; the trainer remembers which ones they are.
+3. **Find the best pair with a heap** of `(-count, pair)` entries. Entries whose count has since changed are skipped when popped.
+
+Training the 32,768-ID vocabulary on 304 MB of FineWeb-Edu takes about 46 seconds and 1.3 GB of memory.
 
 ## 8. Encoding uses learned merge ranks
 
 Encoding new text starts from its byte IDs and applies rules from the frozen merge list. It does not recount frequencies to train a new vocabulary.
 
-The current encoding procedure is:
+The encoding procedure is:
 
-1. Convert the input into byte IDs.
-2. Find adjacent pairs that appear in the learned merge list.
-3. Choose the available pair with the earliest learned rank.
-4. Replace non-overlapping occurrences of that pair.
-5. Repeat until no learned pair applies.
+1. Split the text into chunks with the same pattern used in training.
+2. Convert each chunk into byte IDs.
+3. Find adjacent pairs that appear in the learned merge list.
+4. Choose the available pair with the earliest learned rank.
+5. Replace non-overlapping occurrences of that pair.
+6. Repeat until no learned pair applies, then join the chunks' IDs.
+
+Because the same chunks (` the`, `,`, ` of`) repeat constantly, `encode` remembers each chunk's IDs in a cache, which raised speed from about 1.5 to 10 MB/s on one core. `encode_many` spreads documents across processes, reaching about 50 MB/s on 10 cores for large inputs. tiktoken, which is written in Rust, encodes about 3× faster per core.
+
+`encode_bytes(raw)` treats its input as a single chunk with no splitting, so it works for any bytes, including invalid UTF-8.
 
 For example, suppose the learned rules are:
 
@@ -349,11 +390,11 @@ For the byte API:
 assert tokenizer.decode_bytes(tokenizer.encode_bytes(raw)) == raw
 ```
 
-Valid text passed through encode and decode is preserved exactly. Arbitrary IDs sampled by a future model can form invalid UTF-8, including a sequence ending halfway through an emoji. Strict decoding then raises `UnicodeDecodeError`. The text API supports `errors="replace"` for displaying such output, but replacement is not lossless.
+Valid text passed through encode and decode is preserved exactly. Arbitrary IDs sampled by the model can form invalid UTF-8, including a sequence ending halfway through an emoji. Strict decoding then raises `UnicodeDecodeError`. The text API supports `errors="replace"` for displaying such output, but replacement is not lossless.
 
 ## 10. Special tokens and their current behavior
 
-Special IDs provide markers for the future training pipeline. Reserving an ID does not itself teach a model to respond to it.
+Special IDs provide markers for the training pipeline. Reserving an ID does not itself teach a model to respond to it.
 
 The Python API can explicitly add beginning and end markers:
 
@@ -380,7 +421,7 @@ print(ByteBPETokenizer().encode("<eos>"))
 
 Default decoding skips BOS, EOS, and PAD IDs. Setting `skip_special_tokens=False` raises an error when a special ID appears, because special markers have no text bytes in this design. That option does not render their names into the decoded string.
 
-When we later pack multiple documents for model training, we must explicitly insert EOS IDs if we want the model to see document boundaries. BPE training currently neither inserts EOS nor trains merges involving special tokens.
+When documents are packed together for model training, `scripts/prepare_data.py` inserts an EOS ID after each one, so the model sees where texts end. BPE training neither inserts EOS nor learns merges involving special tokens.
 
 ## 11. The tiny robot-and-cat tokenizer
 
@@ -403,24 +444,26 @@ The command is:
 python3 -m tokenizer train --input examples/tiny_corpus.txt --output models/tiny_tokenizer.json --vocab-size 280
 ```
 
-For this particular saved tokenizer:
+The sentence is first split into the chunks `Hello`, `,`, ` little`, ` robot` and `!`. For this particular saved tokenizer:
 
 ```text
 Hello, little robot!
-→ [72, 278, 44, 279, 270, 116, 33]
+→ [72, 101, 278, 44, 271, 272, 33]
 ```
 
 | ID | Byte sequence | Interpretation |
 |---:|---|---|
 | 72 | `b'H'` | One byte. |
-| 278 | `b'ello'` | Learned four-byte piece. |
+| 101 | `b'e'` | One byte. |
+| 278 | `b'llo'` | Learned three-byte piece. |
 | 44 | `b','` | One punctuation byte. |
-| 279 | `b' little '` | Learned piece including both surrounding spaces. |
-| 270 | `b'robo'` | Learned partial word. |
-| 116 | `b't'` | One byte. |
+| 271 | `b' little'` | Learned word with its leading space. |
+| 272 | `b' robot'` | Learned word with its leading space. |
 | 33 | `b'!'` | One punctuation byte. |
 
 The original sentence contains 20 UTF-8 bytes but encodes as seven tokens.
+
+Before pre-splitting existed, the same corpus produced `[72, 278, 44, 279, 270, 116, 33]`: `H`, `ello`, `,`, ` little ` (with spaces on both sides), `robo`, `t`, `!`. Training with `--no-pre-split` still reproduces it. Both use seven tokens, but the split version's pieces line up with words: ` robot` is one token instead of `robo` + `t`.
 
 For the unfamiliar sentence `A spaceship visited Mars.`, this tokenizer produces 23 tokens for 25 UTF-8 bytes. Most of its byte sequences were not learned as larger pieces in the tiny corpus.
 
@@ -433,7 +476,7 @@ On the same robot-and-cat corpus, with the same default minimum frequency, the v
 | Requested and achieved vocabulary size | Learned merges | Tokens for the sentence |
 |---:|---:|---:|
 | 259 | 0 | 20 |
-| 270 | 11 | 14 |
+| 270 | 11 | 12 |
 | 280 | 21 | 7 |
 
 A larger vocabulary gives this example more reusable pieces. More generally, corpus selection, boundary rules, and the learned merge list affect the token count. A large vocabulary does not automatically produce a better language model.
@@ -462,33 +505,40 @@ Avoid dividing by zero for empty input. Compare tokenizers on the same held-out 
 
 These are sequence-length measurements. They do not directly establish file compression: storing each ID as a multi-byte integer and storing the vocabulary introduces additional space costs.
 
-The planned vocabulary size of 16,384 allows up to:
+The project's real vocabulary size of 32,768 allows up to:
 
 ```text
-16,384 − 259 = 16,125 learned merges
+32,768 − 259 = 32,509 learned merges
 ```
 
-We will need a much more representative corpus and better performance before training that vocabulary.
+Trained on 304 MB of FineWeb-Edu and measured on 25 MB of held-out documents from a different file:
 
-## 13. How vocabulary size affects the future model
+| Tokenizer | Vocabulary | Bytes per token |
+|---|---:|---:|
+| Ours | 32,768 | 4.63 |
+| GPT-2 (tiktoken) | 50,257 | 4.64 |
 
-A future language model will have a token embedding table. If vocabulary size is `V` and embedding width is `d`, the table has:
+Ours was trained on the same kind of text it is tested on, while GPT-2's tokenizer was trained on different web text. The fair summary is "matches GPT-2's compression on FineWeb-Edu with a smaller vocabulary", not "beats GPT-2".
+
+## 13. How vocabulary size affects the model
+
+The language model has a token embedding table. If vocabulary size is `V` and embedding width is `d`, the table has:
 
 ```text
 V × d parameters
 ```
 
-At the planned `V = 16,384` and `d = 768`:
+At the project's `V = 32,768` and `d = 768`:
 
 ```text
-16,384 × 768 = 12,582,912 embedding parameters
+32,768 × 768 = 25,165,824 embedding parameters
 ```
 
-This embedding table has not been implemented yet. Token IDs currently have no learned embedding vectors.
+The table is in `lm/model.py`. Its output layer reuses the same matrix (tied weights), so these 25 million parameters are counted once, out of 124,275,456 in total.
 
 A larger vocabulary increases the size of the embedding table and usually the cost of producing scores over the vocabulary. Efficient tokenization can shorten sequences and fit more raw text into a fixed token context. The best vocabulary therefore depends on both the corpus and the training budget.
 
-The planned `0.1B` refers to roughly 100 million model parameters. It is different from vocabulary size, corpus size, and the number of tokens processed during training.
+The `0.1B` in the project name refers to roughly 100 million model parameters; the final model has about 124 million. It is different from vocabulary size, corpus size, and the number of tokens processed during training.
 
 Changing a tokenizer changes the meaning of IDs. Freeze the tokenizer before a full language-model run, and keep its exact saved definition with the model checkpoint. Two tokenizers can assign different bytes to ID 259 even if their vocabulary sizes match.
 
@@ -496,18 +546,22 @@ Changing a tokenizer changes the meaning of IDs. Freeze the tokenizer before a f
 
 | File | Responsibility |
 |---|---|
-| `tokenizer/bpe.py` | Pair counting, pair replacement, training, encoding, decoding, JSON save/load. |
+| `tokenizer/bpe.py` | Pre-splitting, pair counting, pair replacement, reference and fast training, cached and parallel encoding, decoding, JSON save/load. |
+| `tokenizer/documents.py` | Reads documents from plain files or `.jsonl` lines. |
 | `tokenizer/__init__.py` | Exposes `ByteBPETokenizer` for importing. |
 | `tokenizer/__main__.py` | Implements `python3 -m tokenizer` commands. |
-| `tests/test_tokenizer.py` | Ten tokenizer correctness tests. |
+| `tests/test_tokenizer.py` | 23 tokenizer correctness tests. |
+| `scripts/sample_fineweb.py` | Downloads a reproducible FineWeb-Edu sample. |
+| `scripts/bench_tokenizer.py` | Compares a tokenizer with tiktoken on held-out text. |
 | `examples/tiny_corpus.txt` | Small robot-and-cat training corpus. |
 | `models/demo_tokenizer.json` | Saved demo merge rules. |
 | `models/tiny_tokenizer.json` | Saved rules for the 280-ID tiny tokenizer. |
+| `models/fineweb_edu_32k.json` | The 32,768-ID FineWeb-Edu tokenizer. |
 | `TOKENIZER_LESSON.md` | Shorter walkthrough and exercises. |
 | `README.md` | Commands for running the project. |
 | `PLAN.md` | Broader learning, model, and training plan. |
 
-The code uses `collections.Counter`, `json`, `pathlib.Path`, and `typing.Iterable`. The CLI uses `argparse`. The test suite uses `unittest` and `tempfile`. These are Python standard-library tools. No GPU or external ML package is needed for this stage.
+The tokenizer uses only the Python standard library: `collections`, `heapq`, `re`, `multiprocessing`, `json`, `pathlib` and a few others. The CLI uses `argparse`; the tests use `unittest`. Only the download and benchmark scripts need extra packages (`pyarrow`, `huggingface_hub`, `tiktoken`).
 
 ### 14.1 `count_pairs`
 
@@ -539,10 +593,13 @@ It records the pair's rank and new ID. Merge operands must already exist, and du
 
 | Method or property | Purpose |
 |---|---|
-| `ByteBPETokenizer.train(texts, vocab_size=280, min_frequency=2)` | Train a new tokenizer on an iterable of separate strings. |
-| `ByteBPETokenizer(merges=())` | Construct a byte tokenizer or reconstruct one from ordered pairs. |
+| `ByteBPETokenizer.train(texts, vocab_size=280, min_frequency=2, pattern=GPT2_SPLIT_PATTERN)` | Train a new tokenizer on an iterable of separate strings (a generator works). `pattern=None` turns pre-splitting off. |
+| `ByteBPETokenizer.train_reference(...)` | The simple trainer with the same arguments; kept to check `train`. |
+| `ByteBPETokenizer(merges=(), pattern=GPT2_SPLIT_PATTERN)` | Construct a byte tokenizer or reconstruct one from ordered pairs. |
 | `encode(text, add_bos=False, add_eos=False)` | Encode a UTF-8 string, optionally adding explicit markers. |
-| `encode_bytes(raw)` | Encode a `bytes` value. |
+| `encode_many(texts, add_eos=False, processes=None)` | Encode many documents in parallel processes, in order. |
+| `encode_bytes(raw)` | Encode a `bytes` value as one chunk, without pre-splitting. |
+| `pattern` | The pre-split regular expression, or `None`. |
 | `decode(ids, errors="strict", skip_special_tokens=True)` | Decode IDs to text. |
 | `decode_bytes(ids, skip_special_tokens=True)` | Decode IDs to bytes. |
 | `save(path)` | Save the definition as JSON. |
@@ -556,17 +613,18 @@ Pass training documents as `[text]` for a single document. Passing just `text` i
 
 ## 15. Saved JSON format
 
-The saved definition contains the format identifier, format version, special IDs, and ordered merge pairs. A short illustrative example is:
+The saved definition contains the format identifier, format version, special IDs, the pre-split pattern, and ordered merge pairs. A short illustrative example, with the pattern shortened, is:
 
 ```json
 {
   "format": "educational-byte-bpe",
-  "version": 1,
+  "version": 2,
   "special_tokens": {
     "<bos>": 256,
     "<eos>": 257,
     "<pad>": 258
   },
+  "pattern": "(?i:'s|'t|'re|'ve|'m|'ll|'d)| ?[^\\W\\d_]+| ...",
   "merges": [
     [97, 110],
     [98, 259]
@@ -576,7 +634,7 @@ The saved definition contains the format identifier, format version, special IDs
 
 The first pair becomes ID 259 and represents `an`. The second becomes ID 260 and represents `ban`.
 
-The loader recreates the 256 byte tokens, then reconstructs each learned byte sequence from earlier operands. It validates the format/version and special-ID definitions through the current code.
+The loader recreates the 256 byte tokens, then reconstructs each learned byte sequence from earlier operands. It validates the format/version and special-ID definitions through the current code. The pattern is saved because encoding must split text exactly as training did. Older version 1 files, made before pre-splitting, still load, with `pattern` set to `None`.
 
 The JSON does not contain the original corpus, pair frequency history, requested vocabulary size, or minimum-frequency setting. `training_history` is available on the freshly trained object but is not persisted by `save`. Future reproducibility metadata should record the corpus identity and training settings separately.
 
@@ -606,7 +664,7 @@ python3 -m unittest discover -s tests -v
 python3 -m tokenizer train --input examples/tiny_corpus.txt --output models/tiny_tokenizer.json --vocab-size 280
 ```
 
-Multiple input paths provide separate documents. The `--min-frequency` option changes the threshold; its default is 2.
+Multiple input paths provide separate documents. The `--min-frequency` option changes the threshold; its default is 2. Add `--no-pre-split` to train without chunking, for comparison. The command also prints how long training took.
 
 ### Encode text
 
@@ -617,7 +675,7 @@ python3 -m tokenizer encode --model models/tiny_tokenizer.json 'Hello, little ro
 Expected output for the current tiny corpus:
 
 ```text
-[72, 278, 44, 279, 270, 116, 33]
+[72, 101, 278, 44, 271, 272, 33]
 ```
 
 ### Inspect token pieces
@@ -626,12 +684,12 @@ Expected output for the current tiny corpus:
 python3 -m tokenizer inspect --model models/tiny_tokenizer.json 'Hello, little robot!'
 ```
 
-This shows the byte count, token count, ID, piece bytes, whether a piece is a base byte or learned token, and exact reconstruction.
+This shows the pre-split chunks, byte count, token count, ID, piece bytes, whether a piece is a base byte or learned token, and exact reconstruction.
 
 ### Decode the complete sentence
 
 ```sh
-python3 -m tokenizer decode --model models/tiny_tokenizer.json 72 278 44 279 270 116 33
+python3 -m tokenizer decode --model models/tiny_tokenizer.json 72 101 278 44 271 272 33
 ```
 
 Expected output:
@@ -694,46 +752,53 @@ This example has a different training corpus from the robot-and-cat tokenizer, s
 | Explicit special tokens | BOS/EOS insertion and literal marker text behave as designed. |
 | Save/reload | A saved and loaded tokenizer preserves the tested encoding. |
 | Invalid inputs | Selected invalid training inputs, merge operands, and unknown IDs are rejected. |
+| Pre-split chunks | Known sentences split as expected; chunks of 200 random multilingual strings always join back into the original. |
+| Merges stay inside chunks | With splitting, no learned token contains `.` together with other bytes; without it, one does. |
+| Version 1 files | Old tokenizer files load without pre-splitting. |
+| Fast trainer = reference | Identical merges and counts on the tiny corpus and 60 random corpora full of ties. |
+| Chunk cache | Cached encoding equals uncached encoding, and the cache stays within its size limit. |
+| Parallel encoding | `encode_many` with one or two processes equals `encode`, document by document. |
+| Reading documents | `.jsonl` lines and whole files are read as documents. |
 
-These checks support the intended reference behavior. They do not measure large-corpus speed, demonstrate every possible malformed-file case, or establish the quality of a future language model.
+These checks support the intended behavior. Speed is measured separately with `scripts/bench_tokenizer.py`. The tests do not demonstrate every possible malformed-file case or establish the quality of a language model.
 
-## 19. Current limitations and planned improvements
+## 19. Limitations and what changed since the first version
 
 ### 19.1 Speed and memory
 
-The trainer loads documents into memory, stores IDs as Python integers, recounts all pairs after every merge, and rebuilds the sequences. The encoder scans its current sequence repeatedly to apply ranked merges. These choices make the algorithm easy to inspect but expensive at large scale.
+The first version recounted every pair after every merge and rescanned sequences while encoding: easy to inspect, too slow for real data. That version survives as `train_reference`, the test oracle. The fast trainer and the cached, parallel encoder (sections 7.6 and 8) replaced it for real work.
 
-Before training a 16k vocabulary, we need representative benchmarks, faster pair-count maintenance, and a more efficient encoder. Keeping the current version as a reference will help verify optimized versions.
+Remaining limits: encoding is pure Python and about 3× slower per core than tiktoken's Rust. Training keeps one entry per distinct chunk in memory, about 1.3 GB for 304 MB of web text.
 
 ### 19.2 Boundary and normalization policy
 
-Our current API has no lowercase conversion, accent stripping, or Unicode normalization. It also has no separate regex or word-splitting stage. Learned pieces can include spaces, punctuation, newlines, and multiple words within one document.
+The tokenizer now pre-splits text with a GPT-2-style regular expression (section 7.5), so learned pieces stay within words, numbers, symbol runs or whitespace runs. It still does no lowercase conversion, accent stripping, or Unicode normalization.
 
-A common tokenizer pipeline may include normalization, pre-tokenization, a segmentation model, and post-processing. Our current pipeline uses UTF-8 conversion and ranked BPE, with optional explicit BOS/EOS insertion. The [Hugging Face tokenization pipeline guide](https://huggingface.co/docs/tokenizers/python/latest/pipeline.html) describes these general components.
+A common tokenizer pipeline may include normalization, pre-tokenization, a segmentation model, and post-processing. Ours uses pre-tokenization, UTF-8 conversion and ranked BPE, with optional explicit BOS/EOS insertion. The [Hugging Face tokenization pipeline guide](https://huggingface.co/docs/tokenizers/python/latest/pipeline.html) describes these general components.
 
-Changing boundary or normalization policies later can change the vocabulary and encoded sequences, so those choices must be fixed before the full language-model run.
+Changing the boundary or normalization policy changes the vocabulary and encoded sequences, so it is fixed for the full language-model run: the 32k tokenizer's file hash is recorded and checked by the training code.
 
 ### 19.3 Data representativeness
 
-The tiny corpus repeats robots, cats, doors, and greetings. Its learned pieces reflect those repetitions. It is useful for understanding the algorithm, but final tokenizer training must sample the intended language-model corpus more broadly.
+The tiny corpus repeats robots, cats, doors, and greetings, and its learned pieces reflect that. It is useful for understanding the algorithm. The real tokenizer is trained on 304 MB of FineWeb-Edu, sampled evenly through one file.
 
-Use training documents to learn the vocabulary. Hold out validation/test documents for assessing efficiency and future model performance. Tokenizer training on held-out text can influence later comparisons.
+Training documents and held-out documents come from different files, so the compression comparison with GPT-2 is measured on text the tokenizer never saw.
 
 ### 19.4 Integration work
 
-Still to build: tokenized dataset shards, document packing with explicit EOS, model batches, padding/loss masks where needed, embeddings, next-token training, and generation. A reserved PAD ID alone does not create a padding mask, and an EOS ID alone does not create stopping behavior.
+Built since the first version: tokenized dataset shards with EOS between documents, model batches, the embedding table, next-token training and generation (see `MODEL_LESSON.md` and `TRAINING_LESSON.md`). Training uses fixed-length windows cut from the token stream, so no padding is needed. A reserved PAD ID alone does not create a padding mask. Generation stops when the model produces EOS.
 
 ## 20. Common misunderstandings
 
-**“One token equals one word.”** A token can be much smaller or larger than a word. Our sample contains both `robo` and ` little ` as tokens.
+**“One token equals one word.”** A token can be smaller or larger than a word. Our sample contains both `llo` (part of a word) and ` little` (a word with its leading space) as tokens.
 
-**“The token ID tells us its meaning.”** IDs are labels. ID 278 represents `ello` only in the specific tiny tokenizer discussed here. A future model learns vectors associated with the IDs.
+**“The token ID tells us its meaning.”** IDs are labels. ID 278 represents `llo` only in the specific tiny tokenizer discussed here. The model learns vectors associated with the IDs.
 
 **“Unknown words cannot be encoded.”** Our complete byte vocabulary can represent unfamiliar UTF-8 text, though it may need many small tokens.
 
 **“If an emoji token cannot decode alone, it is broken.”** A token may contain only part of its UTF-8 byte sequence. Decode the joined bytes.
 
-**“Tokenizer training is language-model training.”** BPE training counts and merges sequences. The future language-model training will optimize neural-network parameters.
+**“Tokenizer training is language-model training.”** BPE training counts and merges sequences. Language-model training optimizes neural-network parameters.
 
 **“Setting vocabulary size 280 forces 280 IDs.”** The threshold and available pairs can make training stop early. The demo requests 275 and reaches 269.
 
@@ -752,11 +817,13 @@ Still to build: tokenized dataset shards, document packing with explicit EOS, mo
 3. **Why can our tokenizer encode an unseen emoji?** Every constituent byte already has an initial ID.
 4. **Why are there three `aa` pairs in `aaaa` but two replacements?** Pair counting includes overlapping positions; replacement consumes non-overlapping pairs.
 5. **Why does the demo stop at 269 IDs?** The remaining pair counts fall below the default minimum frequency of two.
-6. **Why is a document boundary different from a newline in this CLI?** Each file is one document, while its newlines are ordinary content.
-7. **Why does `Hello, little robot!` use seven tokens?** The tokenizer learned several recurring multi-byte pieces from the tiny corpus.
+6. **Why is a document boundary different from a newline in this CLI?** Each plain file is one document, while its newlines are ordinary content (and their own whitespace chunks).
+7. **Why does `Hello, little robot!` use seven tokens?** The tokenizer learned several recurring multi-byte pieces from the tiny corpus, including the whole words ` little` and ` robot`.
 8. **Can two different ID sequences decode to the same string?** Yes. Raw bytes and learned combined pieces can reconstruct the same bytes.
 9. **Does a shorter token sequence prove better model quality?** No. It measures representation efficiency; model quality requires separate evaluation.
-10. **What must stay with a future trained model checkpoint?** Its exact tokenizer definition, so every ID retains the intended meaning.
+10. **What must stay with a trained model checkpoint?** Its exact tokenizer definition, so every ID retains the intended meaning.
+11. **Why does pre-splitting stop a token like `t sa` from being learned?** `t` and ` sa…` are in different chunks, and pairs are only counted inside a chunk.
+12. **How do we know the fast trainer is correct?** Tests require it to learn exactly the same merges and counts as the simple reference trainer.
 
 Practical experiment: train three tokenizers on the same tiny corpus with vocabulary sizes 259, 270, and 280. Inspect the same sentence with each, verify reconstruction, and compare bytes per token. Save them to separate files so the experiment does not overwrite the current tiny tokenizer.
 
@@ -768,18 +835,20 @@ Practical experiment: train three tokenizers on the same tiny corpus with vocabu
 - Explain the role of merge ranks during encoding.
 - Make flashcards covering bytes, UTF-8, vocabulary, merges, and special IDs.
 - Quiz me on the difference between tokenizer training and neural-network training.
-- Explain the current tokenizer's memory and speed limitations.
-- Explain how token IDs will connect to embeddings and next-token prediction later.
+- Explain why pre-splitting improves the learned vocabulary.
+- Explain the three ideas that make the fast trainer fast, and why it gives the same answer.
+- Explain how token IDs connect to embeddings and next-token prediction.
 
-The project-specific facts in this source describe the September 30, 2026 implementation. Planned features are explicitly described as future work. The document is a source for learning; illustrative command blocks and questions do not change the implementation.
+The project-specific facts in this source describe the October 31, 2026 implementation. The document is a source for learning; illustrative command blocks and questions do not change the implementation.
 
 ## 23. Sources and scope
 
-Primary evidence for project behavior: the current `tokenizer/bpe.py`, `tokenizer/__main__.py`, `tests/test_tokenizer.py`, and `examples/tiny_corpus.txt`. The sample IDs, byte counts, and vocabulary comparisons in this lesson were checked against those files.
+Primary evidence for project behavior: the current `tokenizer/bpe.py`, `tokenizer/__main__.py`, `tests/test_tokenizer.py`, `scripts/bench_tokenizer.py`, and `examples/tiny_corpus.txt`. The sample IDs, byte counts, and vocabulary comparisons in this lesson were re-checked against those files on October 31, 2026.
 
 Background references:
 
 - [Python Unicode HOWTO](https://docs.python.org/3/howto/unicode.html): strings, byte encodings, and Unicode behavior.
 - [Hugging Face tokenization algorithms guide](https://huggingface.co/docs/transformers/tokenizer_summary): general tokenizer families and the distinction between algorithms and libraries.
 - [Hugging Face tokenization pipeline guide](https://huggingface.co/docs/tokenizers/python/latest/pipeline.html): normalization, pre-tokenization, model, and post-processing components.
+- [Radford et al.: Language Models are Unsupervised Multitask Learners (GPT-2)](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf): byte-level BPE with pre-splitting so merges do not cross character categories.
 - [Sennrich, Haddow, and Birch: Neural Machine Translation of Rare Words with Subword Units](https://arxiv.org/abs/1508.07909): research context for BPE-based subword segmentation. Our educational byte implementation is its own simplified design.

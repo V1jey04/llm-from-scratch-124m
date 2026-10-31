@@ -256,6 +256,7 @@ def train(config: TrainConfig) -> dict:
 
     start_time = last_save = last_log = time.time()
     loss_sum = torch.zeros((), device=device)
+    steps_since_log = 0  # After a resume this can be fewer than log_every.
     status = "finished"
     while step < total_steps:
         lr = learning_rate(step, total_steps, config)
@@ -279,6 +280,7 @@ def train(config: TrainConfig) -> dict:
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
         step += 1
+        steps_since_log += 1
         tokens_seen += tokens_per_step
 
         if step % config.log_every == 0 or step == total_steps:
@@ -286,12 +288,12 @@ def train(config: TrainConfig) -> dict:
                 dist.all_reduce(loss_sum)
                 loss_sum /= world_size
             now = time.time()
-            steps_logged = config.log_every if step % config.log_every == 0 else step % config.log_every
-            logger.log({"step": step, "tokens": tokens_seen, "loss": loss_sum.item() / steps_logged, "lr": lr,
-                        "grad_norm": grad_norm.item(), "tokens_per_s": round(steps_logged * tokens_per_step
-                                                                             / (now - last_log)),
+            logger.log({"step": step, "tokens": tokens_seen, "loss": loss_sum.item() / steps_since_log, "lr": lr,
+                        "grad_norm": grad_norm.item(),
+                        "tokens_per_s": round(steps_since_log * tokens_per_step / (now - last_log)),
                         "scale": scaler.get_scale() if scaler.is_enabled() else 1.0})
             loss_sum.zero_()
+            steps_since_log = 0
             last_log = time.time()
         if step % config.eval_every == 0 or step == total_steps:
             run_eval()

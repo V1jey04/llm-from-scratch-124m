@@ -288,10 +288,13 @@ def train(config: TrainConfig) -> dict:
                 dist.all_reduce(loss_sum)
                 loss_sum /= world_size
             now = time.time()
-            logger.log({"step": step, "tokens": tokens_seen, "loss": loss_sum.item() / steps_since_log, "lr": lr,
-                        "grad_norm": grad_norm.item(),
-                        "tokens_per_s": round(steps_since_log * tokens_per_step / (now - last_log)),
-                        "scale": scaler.get_scale() if scaler.is_enabled() else 1.0})
+            record = {"step": step, "tokens": tokens_seen, "loss": loss_sum.item() / steps_since_log, "lr": lr,
+                      "grad_norm": grad_norm.item(),
+                      "tokens_per_s": round(steps_since_log * tokens_per_step / (now - last_log)),
+                      "scale": scaler.get_scale() if scaler.is_enabled() else 1.0}
+            if device.type == "cuda":  # Peak GPU memory of this process so far.
+                record["max_mem_gb"] = round(torch.cuda.max_memory_allocated(device) / 1e9, 2)
+            logger.log(record)
             loss_sum.zero_()
             steps_since_log = 0
             last_log = time.time()

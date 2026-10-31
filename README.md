@@ -1,15 +1,18 @@
 # Tokenizer + a 0.1B language model
 
-We are starting with a small, working byte-level BPE tokenizer. Everything here
-uses the Python standard library; no GPU, downloads, or package installation is
-needed for this stage. Run commands from this project folder with Python 3.10+.
+A byte-level BPE tokenizer and a ~124M-parameter GPT-style model, written from
+scratch. The tokenizer uses only the Python standard library; the model uses
+PyTorch. Run commands from this project folder with Python 3.10+.
 
 ```sh
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 python3 -m tokenizer demo
-python3 -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
-Follow [the tokenizer lesson](TOKENIZER_LESSON.md) to understand the code, then
+Plain `python3 -m unittest` also works; it skips the model tests if PyTorch is
+missing. Follow [the tokenizer lesson](TOKENIZER_LESSON.md) and
+[the model lesson](MODEL_LESSON.md) to understand the code, then
 use [the project plan](PLAN.md) for the later model and training stages.
 
 Train on your own small UTF-8 text files:
@@ -60,3 +63,27 @@ Held-out FineWeb-Edu, 5,000 documents, 24.7 MB, Apple M4 (10 cores):
 - Speed: tiktoken is written in Rust and is about 3× faster per core.
   `encode_many` uses every core and reaches about 50 MB/s on larger inputs.
 - Tokenizer file SHA-256 (first 16 hex digits): `af1bf016d3825e14`.
+
+## The model
+
+`lm/` holds a decoder-only Transformer in the LLaMA style: RoPE positions,
+RMSNorm, SwiGLU feed-forward layers, no biases, and an output layer tied to the
+token embedding. `lm/config.py` defines the sizes:
+
+| Preset | Layers | Width | Heads | Vocabulary | Context | Parameters |
+|---|---:|---:|---:|---:|---:|---:|
+| `main_124m` | 12 | 768 | 12 | 32,768 | 1,024 | 124,275,456 |
+| `ablation_20m` | 6 | 384 | 6 | 32,768 | 1,024 | ~23.2M |
+| `tiny` | 4 | 128 | 4 | 512 | 128 | 918,656 |
+
+`tests/test_model.py` checks the exact parameter count, causality (changing a
+later token never changes earlier outputs), fused vs. hand-written attention,
+RoPE's relative-position property, gradients, overfitting one batch, save/load,
+and the sampler (greedy, temperature, top-k, top-p, repetition penalty).
+
+End-to-end smoke run: a 512-ID tokenizer and the `tiny` model trained on 5 MB
+of FineWeb-Edu (1,500 steps, 74 s on an M4's GPU; loss 6.27 → about 3.0):
+
+```sh
+.venv/bin/python scripts/train_tiny.py --input data/fineweb_edu/train.jsonl --max-mb 5
+```

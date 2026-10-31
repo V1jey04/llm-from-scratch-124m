@@ -3,8 +3,10 @@
 from collections import Counter, defaultdict
 from functools import partial
 import heapq
+from itertools import islice
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import re
 from typing import Iterable, Iterator
@@ -264,8 +266,13 @@ class ByteBPETokenizer:
             for text in texts:
                 yield self.encode(text, add_eos=add_eos)
             return
+        texts = iter(texts)
+        encode = partial(_encode_in_worker, add_eos=add_eos)
         with multiprocessing.Pool(processes, _start_worker, (self.merges, self.pattern)) as pool:
-            yield from pool.imap(partial(_encode_in_worker, add_eos=add_eos), texts, chunksize=16)
+            # Hand over a block at a time: given a whole stream, the pool would
+            # read all of it into memory before the first result came back.
+            while block := list(islice(texts, 64 * (processes or os.cpu_count()))):
+                yield from pool.imap(encode, block, chunksize=16)
 
     def decode_bytes(self, ids: Iterable[int], *, skip_special_tokens: bool = True) -> bytes:
         pieces = []

@@ -1,0 +1,15 @@
+{
+  "data_dir": "/kaggle/input/fineweb-edu-tokens-32k",
+  "out_dir": "/kaggle/working/run_pilot",
+  "model": "main_124m",
+  "micro_batch_size": 8,
+  "grad_accum_steps": 16,
+  "max_tokens": 300000000,
+  "learning_rate": 0.0006,
+  "warmup_fraction": 0.02,
+  "eval_every": 250,
+  "eval_batches": 20,
+  "log_every": 10,
+  "checkpoint_minutes": 30,
+  "time_limit_hours": 11.25
+}

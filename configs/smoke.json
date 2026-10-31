@@ -1,0 +1,14 @@
+{
+  "data_dir": "data/tokens_local",
+  "out_dir": "runs/smoke",
+  "model": {"vocab_size": 32768, "context_length": 256, "n_layers": 4, "d_model": 256, "n_heads": 4, "mlp_hidden": 704},
+  "micro_batch_size": 16,
+  "grad_accum_steps": 2,
+  "max_tokens": 4000000,
+  "learning_rate": 0.002,
+  "warmup_fraction": 0.05,
+  "eval_every": 100,
+  "eval_batches": 10,
+  "log_every": 25,
+  "checkpoint_minutes": 5
+}

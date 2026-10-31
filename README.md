@@ -12,7 +12,8 @@ python3 -m tokenizer demo
 
 Plain `python3 -m unittest` also works; it skips the model tests if PyTorch is
 missing. Follow [the tokenizer lesson](TOKENIZER_LESSON.md) and
-[the model lesson](MODEL_LESSON.md) to understand the code, then
+[the model lesson](MODEL_LESSON.md) and [the training lesson](TRAINING_LESSON.md)
+to understand the code, then
 use [the project plan](PLAN.md) for the later model and training stages.
 
 Train on your own small UTF-8 text files:
@@ -87,3 +88,41 @@ of FineWeb-Edu (1,500 steps, 74 s on an M4's GPU; loss 6.27 → about 3.0):
 ```sh
 .venv/bin/python scripts/train_tiny.py --input data/fineweb_edu/train.jsonl --max-mb 5
 ```
+
+## Data and training
+
+`scripts/prepare_data.py` tokenizes documents into uint16 shard files with a
+`manifest.json` (counts, checksums, tokenizer hash) and a copy of the
+tokenizer. Validation documents come from a different file than training ones
+(FineWeb-Edu file 013 is never trained on). Locally, 304 MB of text becomes
+66M training tokens in about 20 s:
+
+```sh
+.venv/bin/python scripts/prepare_data.py --tokenizer models/fineweb_edu_32k.json --out data/tokens_local \
+    --train-jsonl data/fineweb_edu/train.jsonl --val-jsonl data/fineweb_edu/heldout.jsonl --val-tokens 2000000
+```
+
+`lm/train.py` trains from a JSON config. Any setting can be changed with
+`--set`. Running the same command again resumes from `out_dir/checkpoint.pt`:
+
+```sh
+.venv/bin/python -m lm.train --config configs/smoke.json                 # Mac, ~6 min
+torchrun --standalone --nproc_per_node=2 -m lm.train --config configs/main_124m.json   # Kaggle 2×T4
+```
+
+| Feature | How |
+|---|---|
+| Mixed precision | fp16 + `GradScaler` on T4s, bf16 on newer GPUs, fp32 on Mac/CPU |
+| Batch size | `world_size × micro_batch_size × grad_accum_steps × context` tokens per step (262,144 for the main run) |
+| Data order | Shuffled non-overlapping windows; each token is seen once per epoch, and the order is rebuilt from `(seed, epoch)` |
+| Schedule | AdamW (β₂ 0.95), linear warmup then cosine to 10%, gradient clipping 1.0, no weight decay on norms or embedding |
+| Checkpoints | Atomic writes every `checkpoint_minutes`; `time_limit_hours` saves and stops before a Kaggle session ends |
+| Logs | Console, `out_dir/log.jsonl`, and Weights & Biases if `wandb_project` is set |
+
+`tests/test_training.py` checks that a stopped-and-resumed run ends with
+bit-identical weights, that gradient accumulation and two-process DDP match a
+single big batch, and that fp16/bf16 training works.
+
+Smoke run on the Mac (11.6M parameters, 4M tokens, M4 GPU, about 6 minutes
+including a stop and resume at step 150): validation loss 5.82, 1.82 bits per
+byte.

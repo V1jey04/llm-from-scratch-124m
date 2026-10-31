@@ -180,6 +180,13 @@ class TrainingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_in("run", model={**SMALL_MODEL, "n_layers": 3})
 
+    def test_resume_refuses_a_different_schedule_but_allows_a_new_time_limit(self):
+        self.run_in("run", stop_after_steps=2)
+        for change in ({"max_tokens": 12 * 4 * 16}, {"learning_rate": 1e-3}, {"seed": 7}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.run_in("run", **change)
+        self.assertEqual(self.run_in("run", time_limit_hours=5.0)["status"], "finished")
+
     def test_gradient_accumulation_matches_one_big_batch(self):
         self.run_in("big_batch")
         self.run_in("accumulated", micro_batch_size=2, grad_accum_steps=2)

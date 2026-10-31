@@ -139,9 +139,12 @@ The trained 32k tokenizer is committed as `tokenizers/fineweb_edu_32k.json`
    (4.0 GB).
 2. **`kaggle/02_train.ipynb`**, a GPU T4 ×2 notebook with the data notebook's
    output attached as an input (**Add Input → Notebook**; no separate dataset
-   is needed): set `CONFIG`, `RUN` and `EXTRA` in the first cell. To resume,
-   attach the previous version's output too; the newest checkpoint for `RUN`
-   is copied in automatically.
+   is needed). Its one cell runs `bash kaggle/train.sh CONFIG RUN [KEY=VALUE…]`.
+   Each session stops itself after `time_limit_hours` and saves a checkpoint;
+   to continue, attach that session's output as an input too and run again.
+   The script copies the checkpoint in and training resumes exactly (a local
+   two-session simulation ends with bit-identical weights). Resuming with a
+   different schedule (token target, learning rate, seed, …) is refused.
 
 Smoke tests of the 124M model on 2×T4 (20 steps, 262,144 tokens per step,
 fp16). Losses were identical to three decimals in both runs:
@@ -151,8 +154,11 @@ fp16). Losses were identical to three decimals in both runs:
 | Eager PyTorch | 15,096 | 11.2 GB |
 | `compile: true` (now the default in the Kaggle configs) | 24,444 | 7.7 GB |
 
-At about 24k tokens/s, 2B tokens take roughly 23 GPU-hours, within one week's
-30-hour Kaggle quota.
+The 300M-token pilot (`configs/pilot_124m.json`) then ran at a steady 31.4k
+tokens/s (30.2k end to end, including compiling, evaluation and checkpoints)
+and reached validation loss 3.747 (about 1.18 bits per byte) in 2.76 hours,
+with no fp16 overflows. At that rate the 2B-token main run takes about 18.4
+GPU-hours: two sessions within one week's 30-hour quota.
 
 ## Talk to a trained model
 

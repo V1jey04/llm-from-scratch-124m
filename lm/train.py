@@ -79,6 +79,11 @@ class TrainConfig:
         return cls(**values)
 
 
+# Changing any of these mid-run would silently alter the schedule or data order.
+SCHEDULE_SETTINGS = ("max_tokens", "learning_rate", "min_lr_ratio", "warmup_fraction", "weight_decay",
+                     "beta1", "beta2", "seed")
+
+
 def learning_rate(step: int, total_steps: int, config: TrainConfig) -> float:
     """Linear warmup to the peak, then cosine decay down to min_lr_ratio x peak."""
     warmup = max(1, round(config.warmup_fraction * total_steps))
@@ -216,6 +221,13 @@ def train(config: TrainConfig) -> dict:
             raise ValueError("The checkpoint was made with a different tokenizer.")
         if checkpoint["tokens_per_step"] != tokens_per_step:
             raise ValueError("Tokens per step changed; the schedule and data order would not match.")
+        # The learning-rate schedule and data order must also continue unchanged.
+        # Settings such as time_limit_hours may differ between sessions.
+        saved = checkpoint["train_config"]
+        changed = [key for key in SCHEDULE_SETTINGS if saved[key] != getattr(config, key)]
+        if changed:
+            raise ValueError(f"Resuming with different {', '.join(changed)} than the checkpoint "
+                             f"({', '.join(f'{key}={saved[key]}' for key in changed)}).")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scaler.load_state_dict(checkpoint["scaler"])

@@ -160,6 +160,27 @@ and reached validation loss 3.747 (about 1.18 bits per byte) in 2.76 hours,
 with no fp16 overflows. At that rate the 2B-token main run takes about 18.4
 GPU-hours: two sessions within one week's 30-hour quota.
 
+## Instruction tuning
+
+A base model only continues text. To make it answer, it is fine-tuned on
+100M tokens of conversations from SmolTalk's mix for small models
+([HuggingFaceTB/smol-smoltalk](https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk),
+Apache-2.0). `lm/chat_format.py` writes each conversation as plain text with
+`System:` / `User:` / `Assistant:` labels and ends every reply with `<eos>`.
+The loss counts only the assistant's tokens: since token IDs stay below 32,768,
+the spare top bit of each stored uint16 marks them, so the existing shard
+writer and sampler are reused unchanged.
+
+```sh
+.venv/bin/python scripts/prepare_sft.py --tokenizer tokenizers/fineweb_edu_32k.json --out data/sft \
+    --train-files train-00000-of-00004 train-00001-of-00004 --train-tokens 100_000_000
+```
+
+That takes 25 s on an M4. Training starts from the pretrained weights
+(`init_from` in `configs/sft_124m.json`). A Mac manages only about 1,500
+tokens/s, so the fine-tune runs on Kaggle: `kaggle/03_finetune.ipynb`, with the
+training notebook's output attached, runs `kaggle/finetune.sh`.
+
 ## Talk to a trained model
 
 Download `final_model.pt` from the training notebook's output (Kaggle may
@@ -169,8 +190,10 @@ save it as `final_model.zip`; it is the same file), put it in `models/`, then:
 .venv/bin/python -m lm.chat --model models/pilot_final_model.pt
 ```
 
-This is a base model: it continues text and was never taught to answer
-questions. Chat mode wraps each message as `Question: … / Answer:` and stops
-at the next blank line or question; `/text` switches to plain continuation.
+An instruction-tuned model's file records its chat format, and the chat then
+keeps the conversation and lets the model end its own replies (`/reset` starts
+over). A base model was never taught to answer questions, so for it chat mode
+wraps each message as `Question: … / Answer:` and stops at the next blank line
+or question. `/text` switches either kind to plain continuation.
 The 300M-token pilot writes fluent English that soon drifts off topic and
 invents facts.

@@ -1,0 +1,16 @@
+{
+  "data_dir": "data/sft",
+  "out_dir": "runs/sft",
+  "init_from": "models/main_final_model.pt",
+  "model": "main_124m",
+  "micro_batch_size": 8,
+  "grad_accum_steps": 4,
+  "max_tokens": 100000000,
+  "learning_rate": 0.0002,
+  "warmup_fraction": 0.03,
+  "eval_every": 100,
+  "eval_batches": 16,
+  "log_every": 10,
+  "checkpoint_minutes": 20,
+  "compile": true
+}

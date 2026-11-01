@@ -27,7 +27,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
 from .config import PRESETS, ModelConfig
-from .data import TokenShards, WindowSampler
+from .data import TokenShards, WindowSampler, split_loss_mask
 from .model import GPT
 
 
@@ -57,6 +57,7 @@ class TrainConfig:
     stop_after_steps: int | None = None  # Save and stop early (tests and pilots).
     seed: int = 1337
     wandb_project: str | None = None
+    init_from: str | None = None  # A saved model to start from (fine-tuning) instead of random weights.
 
     def model_config(self) -> ModelConfig:
         return PRESETS[self.model] if isinstance(self.model, str) else ModelConfig(**self.model)
@@ -126,17 +127,24 @@ def pick_precision(config: TrainConfig, device: torch.device) -> str:
     return "fp32"
 
 
+def batch_for_model(inputs: torch.Tensor, targets: torch.Tensor, masked: bool, device: torch.device):
+    if masked:  # Instruction tuning: score only the assistant's tokens.
+        inputs, targets = split_loss_mask(inputs, targets)
+    return inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+
+
 @torch.no_grad()
-def evaluate(model: GPT, sampler: WindowSampler, config: TrainConfig, autocast, rank, world_size, device) -> float:
+def evaluate(model: GPT, sampler: WindowSampler, config: TrainConfig, autocast, rank, world_size, device,
+             masked: bool = False) -> float:
     """Mean loss over the first windows of the validation split, always the same ones."""
     model.eval()
     count = min(sampler.num_windows, config.eval_batches * config.micro_batch_size * world_size)
     mine = list(range(rank, count, world_size))  # Each process takes every world_size-th window.
     totals = torch.zeros(2, device=device)  # Sum of losses, number of windows.
     for first in range(0, len(mine), config.micro_batch_size):
-        rows = torch.stack([sampler.window(i) for i in mine[first:first + config.micro_batch_size]]).to(device)
+        rows = torch.stack([sampler.window(i) for i in mine[first:first + config.micro_batch_size]])
         with autocast:
-            _, loss = model(rows[:, :-1], rows[:, 1:])
+            _, loss = model(*batch_for_model(rows[:, :-1], rows[:, 1:], masked, device))
         totals += torch.stack([loss.float() * len(rows), torch.tensor(float(len(rows)), device=device)])
     if world_size > 1:
         dist.all_reduce(totals)
@@ -197,12 +205,20 @@ def train(config: TrainConfig) -> dict:
     sampler = WindowSampler(train_shards, T, config.seed)
     val_sampler = WindowSampler(TokenShards(config.data_dir, "val"), T, seed=0)
     val_tokens_per_byte = val_sampler.shards.split_tokens / val_sampler.shards.text_bytes
+    masked = train_shards.manifest.get("loss_mask") == "top_bit"
 
     tokens_per_step = world_size * config.micro_batch_size * config.grad_accum_steps * T
     total_steps = max(1, config.max_tokens // tokens_per_step)
 
     torch.manual_seed(config.seed)  # Identical starting weights in every process.
     model = GPT(model_config).to(device)
+    if config.init_from and not (out_dir / "checkpoint.pt").exists():  # A resume loads its own weights.
+        start = GPT.load(config.init_from)
+        if start.config != model_config:
+            raise ValueError("init_from was saved with a different model configuration.")
+        model.load_state_dict(start.state_dict())
+    if "chat_format" in train_shards.manifest:  # Lets chat.py pick the right prompt format.
+        model.metadata = {"chat_format": train_shards.manifest["chat_format"]}
     optimizer = make_optimizer(model, config, device)
     precision = pick_precision(config, device)
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(precision)
@@ -255,12 +271,14 @@ def train(config: TrainConfig) -> dict:
 
     def run_eval():
         nonlocal best_val_loss
-        val_loss = evaluate(raw_model, val_sampler, config, autocast, rank, world_size, device)
-        # Bits per byte: nats -> bits, then per token -> per byte of original text.
-        # It uses the split's average bytes per token, so it is approximate here;
-        # the final evaluation scores whole documents exactly.
-        logger.log({"step": step, "tokens": tokens_seen, "val_loss": val_loss,
-                    "val_bpb": val_loss / math.log(2) * val_tokens_per_byte})
+        val_loss = evaluate(raw_model, val_sampler, config, autocast, rank, world_size, device, masked)
+        record = {"step": step, "tokens": tokens_seen, "val_loss": val_loss}
+        if not masked:  # With a loss mask only some tokens are scored, so per-byte figures do not apply.
+            # Bits per byte: nats -> bits, then per token -> per byte of original text.
+            # It uses the split's average bytes per token, so it is approximate here;
+            # the final evaluation scores whole documents exactly.
+            record["val_bpb"] = val_loss / math.log(2) * val_tokens_per_byte
+        logger.log(record)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             if main_process:
@@ -275,8 +293,8 @@ def train(config: TrainConfig) -> dict:
         for group in optimizer.param_groups:
             group["lr"] = lr
         for micro_step in range(config.grad_accum_steps):
-            inputs, targets = (t.to(device, non_blocking=True)
-                               for t in sampler.next_batch(config.micro_batch_size, rank, world_size))
+            inputs, targets = batch_for_model(*sampler.next_batch(config.micro_batch_size, rank, world_size),
+                                              masked, device)
             # With DDP, only the last micro-step averages gradients across GPUs.
             last_micro = micro_step == config.grad_accum_steps - 1
             sync = nullcontext() if world_size == 1 or last_micro else model.no_sync()

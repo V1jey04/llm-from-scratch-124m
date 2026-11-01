@@ -3,6 +3,10 @@
 A dataset directory holds `manifest.json`, the tokenizer, and shard files of
 raw little-endian uint16 token IDs (`train_0000.bin`, `val_0000.bin`, ...).
 Documents are joined with `<eos>` between them.
+
+Instruction-tuning data uses the same files. Token IDs stay below 32,768, so
+the top bit of each uint16 is free: there it marks the tokens the loss counts
+(the assistant's replies). The manifest then says "loss_mask": "top_bit".
 """
 
 from array import array
@@ -13,6 +17,24 @@ import sys
 
 import numpy as np
 import torch
+
+
+LOSS_MASK_BIT = 1 << 15
+IGNORE_INDEX = -100  # Targets with this value add nothing to the loss.
+
+
+def mark_trained(ids: list[int], trained: list[bool]) -> list[int]:
+    """Set the top bit on IDs the loss should count."""
+    if any(i >= LOSS_MASK_BIT for i in ids):
+        raise ValueError("Token IDs must stay below 32,768 to leave room for the loss-mask bit.")
+    return [i | LOSS_MASK_BIT if t else i for i, t in zip(ids, trained)]
+
+
+def split_loss_mask(inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Remove the mask bit; targets without it become IGNORE_INDEX."""
+    clear = LOSS_MASK_BIT - 1
+    counted = (targets & LOSS_MASK_BIT) != 0
+    return inputs & clear, torch.where(counted, targets & clear, IGNORE_INDEX)
 
 
 class ShardWriter:
@@ -48,10 +70,14 @@ class ShardWriter:
         self.shards.append({"file": name, "tokens": len(tokens), "sha256": hashlib.sha256(data).hexdigest()})
 
 
-def write_manifest(directory: str | Path, tokenizer: dict, splits: dict, source: dict) -> None:
-    """splits maps a name to {"shards", "documents", "tokens", "text_bytes"}."""
+def write_manifest(directory: str | Path, tokenizer: dict, splits: dict, source: dict,
+                   extra: dict | None = None) -> None:
+    """splits maps a name to {"shards", "documents", "tokens", "text_bytes"}.
+
+    extra adds top-level fields, such as "loss_mask" and "chat_format".
+    """
     manifest = {"format": "uint16-token-shards", "version": 1, "tokenizer": tokenizer,
-                "splits": splits, "source": source}
+                "splits": splits, "source": source, **(extra or {})}
     Path(directory, "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 

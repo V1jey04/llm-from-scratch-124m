@@ -123,6 +123,7 @@ class GPT(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
+        self.metadata = {}  # Saved alongside the weights; see save().
         self.embedding = nn.Embedding(config.vocab_size, config.d_model)
         self.blocks = nn.ModuleList(Block(config) for _ in range(config.n_layers))
         self.final_norm = RMSNorm(config.d_model, config.norm_eps)
@@ -158,17 +159,23 @@ class GPT(nn.Module):
         logits = F.linear(self.final_norm(x), self.embedding.weight)
         if targets is None:
             return logits, None
-        loss = F.cross_entropy(logits.float().flatten(0, 1), targets.flatten())
-        return logits, loss
+        # Targets of -100 (prompt text during instruction tuning) are skipped. Sum
+        # and divide by the count ourselves: a batch with nothing to score gives
+        # 0 rather than the NaN that the built-in mean would return.
+        targets = targets.flatten()
+        loss = F.cross_entropy(logits.float().flatten(0, 1), targets, ignore_index=-100, reduction="sum")
+        return logits, loss / (targets != -100).sum().clamp(min=1)
 
     def save(self, path: str | Path) -> None:
+        """self.metadata holds extra facts for whoever loads the model, such as its chat format."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"config": self.config.to_dict(), "model": self.state_dict()}, path)
+        torch.save({"config": self.config.to_dict(), "model": self.state_dict(), "metadata": self.metadata}, path)
 
     @classmethod
     def load(cls, path: str | Path, device="cpu") -> "GPT":
         checkpoint = torch.load(path, map_location=device, weights_only=True)
         model = cls(ModelConfig.from_dict(checkpoint["config"])).to(device)
         model.load_state_dict(checkpoint["model"])
+        model.metadata = checkpoint.get("metadata", {})  # Older files have none.
         return model

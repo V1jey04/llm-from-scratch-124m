@@ -1,3 +1,4 @@
+import importlib.util
 import io
 import tempfile
 import unittest
@@ -51,6 +52,31 @@ class ChatFormatTests(unittest.TestCase):
             self.assertEqual(self.tokenizer.decode(full[len(prompt):len(prompt) + 1])[0], " ")
         with self.assertRaises(ValueError):
             chat_format.prompt_ids(self.tokenizer, CONVERSATION[:3])
+
+
+class DataMixTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("prepare_sft", ROOT / "scripts" / "prepare_sft.py")
+        cls.prepare = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.prepare)
+
+    def test_filter_drops_code_and_rewriting(self):
+        keep = self.prepare.keep
+
+        def chat(user, reply="Sure."):
+            return [{"role": "user", "content": user}, {"role": "assistant", "content": reply}]
+
+        self.assertTrue(keep(chat("Why is the sky blue?"), "smol-magpie-ultra-short"))
+        self.assertFalse(keep(chat("Why is the sky blue?"), "self-oss-instruct"))  # A coding source.
+        self.assertFalse(keep(chat("Sort a list", "```python\nsorted(x)\n```"), "openhermes-50k"))
+        self.assertFalse(keep(chat("Please edit this paragraph for clarity: ..."), "smol-magpie-ultra-short"))
+        self.assertTrue(keep(chat("Who was the editor of the Times?"), "openhermes-50k"))  # "editor" is not "edit".
+
+    def test_small_talk_is_mixed_in_evenly_and_cycles(self):
+        mixed = list(self.prepare.mix_in(iter(range(7)), ["a", "b"], every=2))
+        self.assertEqual(mixed, [0, 1, "a", 2, 3, "b", 4, 5, "a", 6])
+        self.assertEqual(list(self.prepare.mix_in(iter(range(3)), [], every=2)), [0, 1, 2])
 
 
 class LossMaskTests(unittest.TestCase):

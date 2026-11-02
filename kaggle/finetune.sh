@@ -23,8 +23,7 @@ OUT=$WORKING/run_sft
 echo "start: $FOUND"
 
 pip install -q pyarrow huggingface_hub
-python scripts/prepare_sft.py --tokenizer tokenizers/fineweb_edu_32k.json --out "$DATA" \
-  --train-files train-00000-of-00004 train-00001-of-00004 --train-tokens 100_000_000 --cache /tmp/hf
+python scripts/prepare_sft.py --tokenizer tokenizers/fineweb_edu_32k.json --out "$DATA" --cache /tmp/hf
 
 if command -v nvidia-smi > /dev/null; then
   nvidia-smi --query-gpu=name,memory.total --format=csv

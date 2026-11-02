@@ -172,11 +172,19 @@ the spare top bit of each stored uint16 marks them, so the existing shard
 writer and sampler are reused unchanged.
 
 ```sh
-.venv/bin/python scripts/prepare_sft.py --tokenizer tokenizers/fineweb_edu_32k.json --out data/sft \
-    --train-files train-00000-of-00004 train-00001-of-00004 --train-tokens 100_000_000
+.venv/bin/python scripts/prepare_sft.py --tokenizer tokenizers/fineweb_edu_32k.json --out data/sft
 ```
 
-That takes 25 s on an M4. Training starts from the pretrained weights
+That takes 25 s on an M4.
+
+The first run used SmolTalk as it is: validation loss on the replies fell from
+2.45 to 1.58 in one pass, and direct questions got real answers ("The capital
+of France is Paris."). But "hi" often got Python code or "Here's a revised
+version of your text", because coding and rewriting make up much of the mix
+and casual chat only 0.5%. The data now drops coding, rewriting, summarizing
+and long-document conversations (about a third), and mixes in SmolTalk's 2,260
+everyday conversations, one after every 8 others (`--no-filter` restores the
+original mix). Training starts from the pretrained weights
 (`init_from` in `configs/sft_124m.json`). A Mac manages only about 1,500
 tokens/s, so the fine-tune runs on Kaggle: `kaggle/03_finetune.ipynb`, with the
 training notebook's output attached, runs `kaggle/finetune.sh`.
@@ -191,8 +199,9 @@ save it as `final_model.zip`; it is the same file), put it in `models/`, then:
 ```
 
 An instruction-tuned model's file records its chat format, and the chat then
-keeps the conversation and lets the model end its own replies (`/reset` starts
-over). A base model was never taught to answer questions, so for it chat mode
+uses it and lets the model end its own replies. Each message starts fresh:
+a small model copies whatever is in its context, so one bad reply kept in the
+conversation spoils every later one. `/memory` turns multi-turn memory on. A base model was never taught to answer questions, so for it chat mode
 wraps each message as `Question: … / Answer:` and stops at the next blank line
 or question. `/text` switches either kind to plain continuation.
 The 300M-token pilot writes fluent English that soon drifts off topic and

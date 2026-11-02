@@ -3,15 +3,17 @@
     .venv/bin/python -m lm.chat --model models/sft_final_model.pt
 
 An instruction-tuned model (one whose file records a chat format) gets real
-turns: the conversation so far is sent in lm/chat_format.py's format, and the
-model answers and stops on its own. /reset starts a new conversation.
+turns in lm/chat_format.py's format, and answers and stops on its own. Each
+message starts a fresh conversation unless /memory is on: a small model copies
+whatever is already in its context, so one bad reply kept in memory drags every
+later answer after it. /memory toggles that; /reset clears the conversation.
 
 A base model has only learned to continue text. Chat mode then wraps each
 message as "Question: ...\\nAnswer:" and stops at a blank line, the closest a
 model without instruction tuning gets to answering, and each question stands
 alone. Text mode simply continues whatever you type.
 
-Commands: /chat, /text, /reset, /temp 0.7, /tokens 150, /quit
+Commands: /chat, /text, /memory, /reset, /temp 0.7, /tokens 150, /quit
 """
 
 import argparse
@@ -76,10 +78,10 @@ def main():
     instruct = model.metadata.get("chat_format") == chat_format.FORMAT
     mode, temperature = "chat", args.temperature
     max_tokens = args.max_tokens or (300 if instruct else 120)
-    history = []
+    history, memory = [], False
     kind = "instruction-tuned" if instruct else "base model"
     print(f"Loaded {model.num_parameters():,} parameters ({kind}) on {args.device}. "
-          "Commands: /chat, /text, /reset, /temp N, /tokens N, /quit\n")
+          "Commands: /chat, /text, /memory, /reset, /temp N, /tokens N, /quit\n")
     while True:
         try:
             message = input(f"[{mode}] you> ").strip()
@@ -98,6 +100,11 @@ def main():
             history = []
             print("New conversation.\n")
             continue
+        if command == "/memory":
+            memory, history = not memory, []
+            print("Memory on: replies see the conversation so far.\n" if memory
+                  else "Memory off: each message starts a fresh conversation.\n")
+            continue
         if command in ("/temp", "/tokens"):
             try:
                 if command == "/temp":
@@ -112,6 +119,8 @@ def main():
             respond(model, tokenizer, tokenizer.encode(message), (), temperature, max_tokens)
         elif instruct:
             print("model> ", end="", flush=True)
+            if not memory:
+                history = []
             history.append({"role": "user", "content": message})
             reply = respond(model, tokenizer, chat_format.prompt_ids(tokenizer, history), INSTRUCT_STOPS,
                             temperature, max_tokens)
